@@ -141,7 +141,7 @@ async function handleIndexGet (request, env) {
   )
 }
 
-async function handleCorsProxyGet (request, url, env) {
+async function handleCorsProxyRequest (request, url, env) {
   const origin = request.headers.get('Origin')
   const targetPath = request.url.substring(url.origin.length + 1)
   let targetUrl = targetPath.replace(/^http(s?):\/([^/])/, 'http$1://$2')
@@ -207,15 +207,117 @@ async function handleCorsProxyGet (request, url, env) {
   })
 }
 
-async function handleGet (request, env) {
+async function handleThumbnailGet (request, env, context) {
   const url = new URL(request.url)
-  if (url.pathname === '/favicon.ico') return
+  const targetPath = request.url.substring(url.origin.length + 11)
+  const targetUrl = targetPath.replace(/^http(s?):\/([^/])/, 'http$1://$2')
+
+  const store = getStore(env)
+  const now = new Date().getTime()
+
+  const keyPrefix = `thumbnails/${btoa(targetUrl)}`
+  const thumbMetaEntry = await store.get(`${keyPrefix}.json`)
+
+  if (thumbMetaEntry) {
+    const { expireAt } = await thumbMetaEntry.json()
+
+    if (now < expireAt) {
+      const thumbEntry = await store.get(`${keyPrefix}.png`)
+
+      if (thumbEntry) {
+        const thumbData = await thumbEntry.arrayBuffer()
+
+        return new Response(thumbData, {
+          headers: {
+            'Content-Length': thumbData.byteLength,
+            'Content-Type': 'image/png'
+          }
+        })
+      }
+    }
+  }
+
+  let thumbData
+
+  if (env.THUMBALIZR_API_KEY) {
+    const thumbUrl = `https://api.thumbalizr.com/?api_key=${
+      env.THUMBALIZR_API_KEY
+    }&url=${encodeURIComponent(
+      targetUrl
+    )}&width=1280size=screen&encoding=png&bwidth=1280&bheight=720&country=us`
+
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(thumbUrl)
+
+      if (res.headers.get('X-Thumbalizr-Status') === 'OK') {
+        thumbData = await res.arrayBuffer()
+        break
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+  } else {
+    let res
+
+    try {
+      res = await fetch(targetUrl)
+    } catch (e) {
+      return new Response('', { status: 404 })
+    }
+
+    const body = await res.text()
+    const regex1 = /<meta [^>]*property=["']og:image["'] [^>]*content=["']([^'^"]+?)["'][^>]*>/i
+    const regex2 = /<meta [^>]*content=["']([^'^"]+?)["'] [^>]*property=["']og:image["'][^>]*>/
+
+    let imageUrl = null
+
+    const match1 = body.match(regex1)
+    const match2 = body.match(regex2)
+
+    if (match1) {
+      imageUrl = match1[1]
+    } else if (match2) {
+      imageUrl = match2[1]
+    } else {
+      return new Response('', { status: 404 })
+    }
+
+    thumbData = await (await fetch(imageUrl)).arrayBuffer()
+  }
+
+  if (thumbData) {
+    context.waitUntil(
+      store.put(
+        `${keyPrefix}.json`,
+        JSON.stringify({ expireAt: now + 8 * 60 * 60 * 1000 })
+      )
+    )
+
+    context.waitUntil(await store.put(`${keyPrefix}.png`, thumbData))
+
+    return new Response(thumbData, {
+      headers: {
+        'Content-Length': thumbData.byteLength,
+        'Content-Type': 'image/png'
+      }
+    })
+  } else {
+    return new Response('', { status: 404 })
+  }
+}
+
+async function handleGet (request, env, context) {
+  const url = new URL(request.url)
+  if (url.pathname === '/favicon.ico') return new Response('', { status: 404 })
 
   if (url.pathname === '/') {
     return handleIndexGet(request, env)
   }
+  if (url.pathname.startsWith('/thumbnail')) {
+    return handleThumbnailGet(request, env, context)
+  }
 
-  return handleCorsProxyGet(request, url, env)
+  return handleCorsProxyRequest(request, url, env)
 }
 
 async function handleOptions (request, env) {
@@ -241,7 +343,7 @@ async function handleOptions (request, env) {
     // If you want to allow other HTTP Methods, you can do that here.
     return new Response(null, {
       headers: {
-        Allow: 'GET, POST, DELETE, OPTIONS'
+        Allow: 'HEAD, GET, POST, DELETE, OPTIONS'
       }
     })
   }
@@ -663,6 +765,10 @@ export default {
 
     if (request.method === 'GET') {
       return handleGet(request, env, context)
+    }
+
+    if (request.method === 'HEAD') {
+      return handleCorsProxyRequest(request, new URL(request.url), env)
     }
 
     if (request.method === 'OPTIONS') {
