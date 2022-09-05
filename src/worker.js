@@ -201,7 +201,7 @@ async function handleCorsProxyRequest (request, url, env) {
   responseHeaders.set('X-Content-Type-Options', 'nosniff')
 
   // Disallow video
-  if (res.headers.get('Content-Type').indexOf('video')) {
+  if (res.headers.get('Content-Type').indexOf('video') >= 0) {
     return new Response('', { status: 405 })
   }
 
