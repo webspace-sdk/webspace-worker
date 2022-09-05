@@ -1,3 +1,5 @@
+/* globals Response Headers */
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,HEAD,POST,DELETE,OPTIONS',
@@ -98,26 +100,6 @@ function getRandomString (length) {
   return result
 }
 
-function b64toBlob (b64Data, contentType = '', sliceSize = 512) {
-  const byteCharacters = atob(b64Data)
-  const byteArrays = []
-
-  for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
-    const slice = byteCharacters.slice(offset, offset + sliceSize)
-
-    const byteNumbers = new Array(slice.length)
-    for (let i = 0; i < slice.length; i++) {
-      byteNumbers[i] = slice.charCodeAt(i)
-    }
-
-    const byteArray = new Uint8Array(byteNumbers)
-    byteArrays.push(byteArray)
-  }
-
-  const blob = new Blob(byteArrays, { type: contentType })
-  return blob
-}
-
 function getEntryDeleteKey (entry) {
   return entry[entry.length - 1]
 }
@@ -142,11 +124,11 @@ function getEntryPayloadLength (entry) {
   return entry.length - 3
 }
 
-async function handleGet (request, env) {
+async function handleIndexGet (request, env) {
   const hasStore = !!getStore(env)
 
   return new Response(
-    `<html><body style="font-size: 24px; padding: 18px; font-family: Arial, sans-serif"">Hello from P2PCF<br/><div style=\"line-height: 28px; margin-top: 8px; font-size: 0.8em\">${
+    `<html><body style="font-size: 24px; padding: 18px; font-family: Arial, sans-serif"">Hello from Webspaces<br/><div style="line-height: 28px; margin-top: 8px; font-size: 0.8em">${
       hasStore
         ? '&#128077; R2 bucket is configured properly, ready to serve.'
         : '&#10060; Couldn\'t find a configured R2 bucket.<br/>Make sure you <a href="https://github.com/gfodor/p2pcf/blob/master/INSTALL.md#set-up-the-r2-bucket" target="_blank">created a bucket</a> and <a href="https://github.com/gfodor/p2pcf/blob/master/INSTALL.md#bind-the-worker-to-r2" target="_blank">connected the worker to it</a>.'
@@ -157,6 +139,83 @@ async function handleGet (request, env) {
       }
     }
   )
+}
+
+async function handleCorsProxyGet (request, url, env) {
+  const origin = request.headers.get('Origin')
+  const targetPath = request.url.substring(url.origin.length + 1)
+  let targetUrl = targetPath.replace(/^http(s?):\/([^/])/, 'http$1://$2')
+
+  if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+    targetUrl = url.protocol + '//' + targetUrl
+  }
+
+  const requestHeaders = new Headers(request.headers)
+  requestHeaders.delete('Origin') // Some domains disallow access from improper Origins
+  const res = await fetch(targetUrl, {
+    headers: requestHeaders,
+    method: request.method,
+    redirect: 'manual',
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy
+  })
+  const responseHeaders = new Headers(res.headers)
+  const proxyUrl = new URL(url.origin)
+  const redirectLocation =
+    responseHeaders.get('Location') || responseHeaders.get('location')
+
+  if (redirectLocation) {
+    if (!redirectLocation.startsWith('/')) {
+      responseHeaders.set(
+        'Location',
+        proxyUrl.protocol + '//' + proxyUrl.host + '/' + redirectLocation
+      )
+    } else {
+      const tUrl = new URL(targetUrl)
+      responseHeaders.set(
+        'Location',
+        proxyUrl.protocol +
+          '//' +
+          proxyUrl.host +
+          '/' +
+          tUrl.origin +
+          redirectLocation
+      )
+    }
+  }
+
+  if (
+    origin &&
+    !env.ALLOWED_ORIGINS | (env.ALLOWED_ORIGINS.split(',').indexOf(origin) >= 0)
+  ) {
+    responseHeaders.set('Access-Control-Allow-Origin', origin)
+    responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+    responseHeaders.set('Access-Control-Allow-Headers', 'Range')
+    responseHeaders.set(
+      'Access-Control-Expose-Headers',
+      'Accept-Ranges, Content-Encoding, Content-Length, Content-Range'
+    )
+  }
+
+  responseHeaders.set('Vary', 'Origin')
+  responseHeaders.set('X-Content-Type-Options', 'nosniff')
+
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: responseHeaders
+  })
+}
+
+async function handleGet (request, env) {
+  const url = new URL(request.url)
+  if (url.pathname === '/favicon.ico') return
+
+  if (url.pathname === '/') {
+    return handleIndexGet(request, env)
+  }
+
+  return handleCorsProxyGet(request, url, env)
 }
 
 async function handleOptions (request, env) {
@@ -492,7 +551,7 @@ async function handlePost (request, env, context) {
   ) {
     // Add a random delay and re-check to avoid stampede.
     context.waitUntil(
-      new Promise(res => {
+      new Promise(resolve => {
         setTimeout(async () => {
           const now = new Date().getTime()
           const nextVacuumEntry = await store.get(`rooms/${roomId}/next_vacuum`)
@@ -537,7 +596,7 @@ async function handlePost (request, env, context) {
             )
           }
 
-          res()
+          resolve()
         }, Math.floor(Math.random() * 10 * 1000))
       })
     )
@@ -610,10 +669,11 @@ export default {
       return handleOptions(request, env, context)
     }
 
-    if (request.headers.get('content-type') !== 'application/json')
+    if (request.headers.get('content-type') !== 'application/json') {
       return new Response('Expected content-type application/json', {
         status: 400
       })
+    }
 
     if (
       request.headers.get('x-worker-method') === 'DELETE' ||
