@@ -212,6 +212,74 @@ async function handleCorsProxyRequest (request, url, env) {
   })
 }
 
+// Fetches the access control and content for a URL
+async function handleMetadataGet (request, env, context) {
+  const url = new URL(request.url)
+  const targetPath = request.url.substring(url.origin.length + 6)
+  const targetUrl = targetPath.replace(/^http(s?):\/([^/])/, 'http$1://$2')
+  const origin = request.headers.get('Origin') || 'https://example.com'
+  const store = getStore(env)
+  const now = new Date().getTime()
+
+  const keyPrefix = `metas/${btoa(targetUrl)}`
+  const metaMetaEntry = await store.get(`${keyPrefix}.meta.json`)
+
+  if (metaMetaEntry) {
+    const { expireAt } = await metaMetaEntry.json()
+
+    if (now < expireAt) {
+      const metaEntry = await store.get(`${keyPrefix}.json`)
+
+      if (metaEntry) {
+        const metaData = await metaEntry.arrayBuffer()
+
+        return new Response(metaData, {
+          headers: {
+            'Content-Length': metaData.byteLength,
+            'Content-Type': 'application/json'
+          }
+        })
+      }
+    }
+  }
+
+  const optionRequestPromise = fetch(targetUrl, {
+    method: 'OPTIONS',
+    headers: {
+      'Access-Control-Request-Method': 'GET',
+      Origin: origin
+    }
+  })
+
+  const headRequestPromise = fetch(targetUrl, { method: 'HEAD' })
+
+  await Promise.all([optionRequestPromise, headRequestPromise])
+
+  const headResponse = await headRequestPromise
+  const optionsResponse = await optionRequestPromise
+
+  const data = JSON.stringify({
+    content_type: headResponse.headers.get('Content-Type'),
+    get_allowed: optionsResponse.headers.get('Access-Control-Allow-Origin') === '*' || optionsResponse.headers.get('Access-Control-Allow-Origin') === origin
+  })
+
+  context.waitUntil(
+    store.put(
+      `${keyPrefix}.meta.json`,
+      JSON.stringify({ expireAt: now + 8 * 60 * 60 * 1000 })
+    )
+  )
+
+  context.waitUntil(store.put(`${keyPrefix}.json`, data))
+
+  return new Response(data, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': data.length
+    }
+  })
+}
+
 async function handleThumbnailGet (request, env, context) {
   const url = new URL(request.url)
   const targetPath = request.url.substring(url.origin.length + 11)
@@ -221,7 +289,7 @@ async function handleThumbnailGet (request, env, context) {
   const now = new Date().getTime()
 
   const keyPrefix = `thumbnails/${btoa(targetUrl)}`
-  const thumbMetaEntry = await store.get(`${keyPrefix}.json`)
+  const thumbMetaEntry = await store.get(`${keyPrefix}.meta.json`)
 
   if (thumbMetaEntry) {
     const { expireAt } = await thumbMetaEntry.json()
@@ -293,12 +361,12 @@ async function handleThumbnailGet (request, env, context) {
   if (thumbData) {
     context.waitUntil(
       store.put(
-        `${keyPrefix}.json`,
+        `${keyPrefix}.meta.json`,
         JSON.stringify({ expireAt: now + 8 * 60 * 60 * 1000 })
       )
     )
 
-    context.waitUntil(await store.put(`${keyPrefix}.png`, thumbData))
+    context.waitUntil(store.put(`${keyPrefix}.png`, thumbData))
 
     return new Response(thumbData, {
       headers: {
@@ -320,6 +388,9 @@ async function handleGet (request, env, context) {
   }
   if (url.pathname.startsWith('/thumbnail')) {
     return handleThumbnailGet(request, env, context)
+  }
+  if (url.pathname.startsWith('/meta')) {
+    return handleMetadataGet(request, env, context)
   }
 
   return handleCorsProxyRequest(request, url, env)
