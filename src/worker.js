@@ -373,6 +373,7 @@ async function handleThumbnailGet (request, env, context) {
 
     return new Response(thumbData, {
       headers: {
+        ...corsHeaders,
         'Content-Length': thumbData.byteLength,
         'Content-Type': 'image/png'
       }
