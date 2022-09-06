@@ -235,6 +235,7 @@ async function handleMetadataGet (request, env, context) {
 
         return new Response(metaData, {
           headers: {
+            ...corsHeaders,
             'Content-Length': metaData.byteLength,
             'Content-Type': 'application/json'
           }
@@ -302,6 +303,7 @@ async function handleThumbnailGet (request, env, context) {
 
         return new Response(thumbData, {
           headers: {
+            ...corsHeaders,
             'Content-Length': thumbData.byteLength,
             'Content-Type': 'image/png'
           }
