@@ -247,6 +247,7 @@ async function handleMetadataGet (request, env, context) {
   const optionRequestPromise = fetch(targetUrl, {
     method: 'OPTIONS',
     headers: {
+      ...corsHeaders,
       'Access-Control-Request-Method': 'GET',
       Origin: origin
     }
