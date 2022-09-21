@@ -259,6 +259,10 @@ async function handleMetadataGet (request, env, context) {
   const headResponse = await headRequestPromise
   const optionsResponse = await optionRequestPromise
 
+  if (headResponse.status !== 200 || optionsResponse.status !== 200) {
+    return new Response('', { status: 404 })
+  }
+
   const data = JSON.stringify({
     content_type: headResponse.headers.get('Content-Type'),
     get_allowed: optionsResponse.headers.get('Access-Control-Allow-Origin') === '*' || optionsResponse.headers.get('Access-Control-Allow-Origin') === origin
