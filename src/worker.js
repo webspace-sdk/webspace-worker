@@ -186,7 +186,7 @@ async function handleCorsProxyRequest (request, url, env) {
 
   if (
     origin &&
-    !env.ALLOWED_ORIGINS | (env.ALLOWED_ORIGINS.split(',').indexOf(origin) >= 0)
+    (!env.ALLOWED_ORIGINS || (env.ALLOWED_ORIGINS.split(',').indexOf(origin) >= 0))
   ) {
     responseHeaders.set('Access-Control-Allow-Origin', origin)
     responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
