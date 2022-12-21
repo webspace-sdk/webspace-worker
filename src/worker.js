@@ -260,7 +260,7 @@ async function handleMetadataGet (request, env, context) {
   const optionsResponse = await optionRequestPromise
 
   if (headResponse.status !== 200) {
-    return new Response('', { status: 404 })
+    return new Response('', { status: 404 });
   }
 
   const data = JSON.stringify({
@@ -319,17 +319,23 @@ async function handleThumbnailGet (request, env, context) {
 
   let thumbData
 
-  if (env.THUMBALIZR_API_KEY) {
-    const thumbUrl = `https://api.thumbalizr.com/?api_key=${
-      env.THUMBALIZR_API_KEY
-    }&url=${encodeURIComponent(
-      targetUrl
-    )}&width=1280size=screen&encoding=png&bwidth=1280&bheight=720&country=us`
+  if (env.BROWSERLESS_API_KEY) {
+    const thumbUrl = `https://chrome.browserless.io/screenshot?token=${env.BROWSERLESS_API_KEY}`
+    const payload = JSON.stringify({
+      clip: {
+        width: 1280,
+        height: 720,
+        x: 0,
+        y: 0
+      },
+      type: "png",
+      url: targetUrl,
+      encoding: "binary"
+    })
 
     for (let i = 0; i < 30; i++) {
-      const res = await fetch(thumbUrl)
-
-      if (res.headers.get('X-Thumbalizr-Status') === 'OK') {
+      const res = await fetch(thumbUrl, { method: "POST", body: payload, headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" } })
+      if (res.status === 200) {
         thumbData = await res.arrayBuffer()
         break
       }
