@@ -321,20 +321,31 @@ async function handleThumbnailGet (request, env, context) {
 
   if (env.BROWSERLESS_API_KEY) {
     const thumbUrl = `https://chrome.browserless.io/screenshot?token=${env.BROWSERLESS_API_KEY}`
-    const payload = JSON.stringify({
-      clip: {
-        width: 1280,
-        height: 720,
-        x: 0,
-        y: 0
-      },
-      type: "png",
-      url: targetUrl,
-      encoding: "binary"
-    })
 
     for (let i = 0; i < 30; i++) {
-      const res = await fetch(thumbUrl, { method: "POST", body: payload, headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" } })
+      const payload = {
+        options: {
+          type: "png"
+        },
+        url: targetUrl,
+        viewport: {
+          deviceScaleFactor: 1.0,
+          hasTouch: false,
+          height: 720,
+          isLandscape: true,
+          isMobile: false,
+          width: 1280
+        },
+        waitFor: 10000
+      }
+
+      if (i === 0) {
+        payload.gotoOptions = {
+          waitUntil: "networkidle2"
+        }
+      }
+
+      const res = await fetch(thumbUrl, { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" } })
       if (res.status === 200) {
         thumbData = await res.arrayBuffer()
         break
