@@ -252,16 +252,27 @@ async function handleMetadataGet (request, env, context) {
     }
   })
 
-  const headRequestPromise = fetch(targetUrl, { method: 'HEAD' })
+  let contentType = null;
 
-  await Promise.all([optionRequestPromise, headRequestPromise])
+  for (const params of [
+    { method: "HEAD" },
+    { method: "HEAD", headers: { "User-Agent": "webspace-worker" }},
+    { method: "GET", headers: { "Range": "bytes=0-128" }},
+    { method: "GET", headers: { "User-Agent": "webspace-worker", "Range": "bytes=0-128" }},
+  ]) {
+    const response = await fetch(targetUrl, params)
 
-  const headResponse = await headRequestPromise
-  const optionsResponse = await optionRequestPromise
-
-  if (headResponse.status !== 200) {
-    return new Response('', { status: 404 });
+    if (response.status === 200 && response.headers.get('Content-Type')) {
+      contentType = response.headers.get('Content-Type')
+      break;
+    }
   }
+
+  if (contentType === null) {
+    return new Response('', { status: 404 })
+  }
+
+  const optionsResponse = await optionRequestPromise
 
   const data = JSON.stringify({
     content_type: headResponse.headers.get('Content-Type'),
