@@ -275,7 +275,7 @@ async function handleMetadataGet (request, env, context) {
   const optionsResponse = await optionRequestPromise
 
   const data = JSON.stringify({
-    content_type: headResponse.headers.get('Content-Type'),
+    content_type: contentType,
     get_allowed: optionsResponse.status === 200 && (optionsResponse.headers.get('Access-Control-Allow-Origin') === '*' || optionsResponse.headers.get('Access-Control-Allow-Origin') === origin)
   })
 
