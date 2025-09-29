@@ -39,6 +39,20 @@ function buildCorsHeaders (request, env, overrides = {}) {
   return headers
 }
 
+async function drainResponse (response) {
+  if (!response || response.bodyUsed) return
+
+  try {
+    await response.arrayBuffer()
+  } catch (error) {
+    if (response.body && typeof response.body.cancel === 'function') {
+      try {
+        await response.body.cancel()
+      } catch (_) {}
+    }
+  }
+}
+
 const IPV4_REGEX = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/
 
 const IPV6_REGEX = /(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))/
@@ -299,19 +313,26 @@ async function handleMetadataGet (request, env, context) {
     }
   })
 
-  let contentType = null;
+  let contentType = null
 
   for (const params of [
-    { method: "HEAD" },
-    { method: "HEAD", headers: { "User-Agent": "webspace-worker" }},
-    { method: "GET", headers: { "Range": "bytes=0-128" }},
-    { method: "GET", headers: { "User-Agent": "webspace-worker", "Range": "bytes=0-128" }},
+    { method: 'HEAD' },
+    { method: 'HEAD', headers: { 'User-Agent': 'webspace-worker' } },
+    { method: 'GET', headers: { Range: 'bytes=0-128' } },
+    { method: 'GET', headers: { 'User-Agent': 'webspace-worker', Range: 'bytes=0-128' } }
   ]) {
     const response = await fetch(targetUrl, params)
+    const header = response.headers.get('Content-Type')
+    const isSuccess = (response.status === 200 || response.status === 206) && header
 
-    if (response.status === 200 && response.headers.get('Content-Type')) {
-      contentType = response.headers.get('Content-Type')
-      break;
+    if (isSuccess) {
+      contentType = header
+    }
+
+    await drainResponse(response)
+
+    if (isSuccess) {
+      break
     }
   }
 
@@ -320,10 +341,16 @@ async function handleMetadataGet (request, env, context) {
   }
 
   const optionsResponse = await optionRequestPromise
+  const allowOriginHeader = optionsResponse.headers.get('Access-Control-Allow-Origin')
+  const getAllowed =
+    optionsResponse.status === 200 &&
+    (allowOriginHeader === '*' || allowOriginHeader === origin)
+
+  await drainResponse(optionsResponse)
 
   const data = JSON.stringify({
     content_type: contentType,
-    get_allowed: optionsResponse.status === 200 && (optionsResponse.headers.get('Access-Control-Allow-Origin') === '*' || optionsResponse.headers.get('Access-Control-Allow-Origin') === origin)
+    get_allowed: getAllowed
   })
 
   context.waitUntil(
@@ -380,12 +407,28 @@ async function handleThumbnailGet (request, env, context) {
   let thumbData
 
   if (env.BROWSERLESS_API_KEY) {
-    const thumbUrl = `https://chrome.browserless.io/screenshot?token=${env.BROWSERLESS_API_KEY}`
+    let browserlessUrl
+
+    try {
+      const endpoint = new URL(
+        (env.BROWSERLESS_ENDPOINT && env.BROWSERLESS_ENDPOINT.trim()) ||
+          'https://production-sfo.browserless.io/screenshot'
+      )
+      endpoint.searchParams.set('token', env.BROWSERLESS_API_KEY)
+      browserlessUrl = endpoint.toString()
+    } catch (err) {
+      console.warn('Invalid Browserless endpoint, falling back to default', err)
+      const fallback = new URL('https://production-sfo.browserless.io/screenshot')
+      fallback.searchParams.set('token', env.BROWSERLESS_API_KEY)
+      browserlessUrl = fallback.toString()
+    }
+
+    let lastError = null
 
     for (let i = 0; i < 30; i++) {
       const payload = {
         options: {
-          type: "png"
+          type: 'png'
         },
         url: targetUrl,
         viewport: {
@@ -396,22 +439,41 @@ async function handleThumbnailGet (request, env, context) {
           isMobile: false,
           width: 1280
         },
-        waitFor: 10000
+        waitForTimeout: 10000
       }
 
       if (i === 0) {
         payload.gotoOptions = {
-          waitUntil: "networkidle2"
+          waitUntil: 'networkidle2'
         }
       }
 
-      const res = await fetch(thumbUrl, { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" } })
+      const res = await fetch(browserlessUrl, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache'
+        }
+      })
+
       if (res.status === 200) {
         thumbData = await res.arrayBuffer()
         break
       }
 
+      try {
+        const errorText = await res.text()
+        lastError = { status: res.status, body: errorText }
+      } catch (error) {
+        lastError = { status: res.status }
+      }
+
       await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+
+    if (!thumbData && lastError) {
+      console.warn('Browserless screenshot failed', lastError)
     }
   } else {
     let res
