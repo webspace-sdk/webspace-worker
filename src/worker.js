@@ -1,9 +1,42 @@
 /* globals Response Headers */
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,HEAD,POST,DELETE,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS',
   'Access-Control-Max-Age': '86400'
+}
+
+function getAllowedOrigins (env) {
+  if (!env.ALLOWED_ORIGINS) return null
+
+  return env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim()).filter(Boolean)
+}
+
+function isOriginAllowed (origin, env) {
+  if (!origin) return false
+
+  const allowedOrigins = getAllowedOrigins(env)
+
+  if (!allowedOrigins) return true
+
+  return allowedOrigins.includes(origin)
+}
+
+function buildCorsHeaders (request, env, overrides = {}) {
+  const headers = {
+    ...corsHeaders,
+    ...overrides
+  }
+
+  const origin = request.headers.get('Origin')
+
+  if (origin && isOriginAllowed(origin, env)) {
+    headers['Access-Control-Allow-Origin'] = origin
+    headers['Access-Control-Allow-Credentials'] = 'true'
+  } else {
+    headers['Access-Control-Allow-Origin'] = '*'
+  }
+
+  return headers
 }
 
 const IPV4_REGEX = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/
@@ -152,13 +185,19 @@ async function handleCorsProxyRequest (request, url, env) {
 
   const requestHeaders = new Headers(request.headers)
   requestHeaders.delete('Origin') // Some domains disallow access from improper Origins
-  const res = await fetch(targetUrl, {
+  const fetchInit = {
     headers: requestHeaders,
     method: request.method,
     redirect: 'manual',
     referrer: request.referrer,
     referrerPolicy: request.referrerPolicy
-  })
+  }
+
+  if (request.body && request.method !== 'GET' && request.method !== 'HEAD') {
+    fetchInit.body = request.body
+  }
+
+  const res = await fetch(targetUrl, fetchInit)
   const responseHeaders = new Headers(res.headers)
   const proxyUrl = new URL(url.origin)
   const redirectLocation =
@@ -184,17 +223,13 @@ async function handleCorsProxyRequest (request, url, env) {
     }
   }
 
-  if (
-    origin &&
-    (!env.ALLOWED_ORIGINS || (env.ALLOWED_ORIGINS.split(',').indexOf(origin) >= 0))
-  ) {
-    responseHeaders.set('Access-Control-Allow-Origin', origin)
-    responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
-    responseHeaders.set('Access-Control-Allow-Headers', 'Range')
-    responseHeaders.set(
-      'Access-Control-Expose-Headers',
-      'Accept-Ranges, Content-Encoding, Content-Length, Content-Range'
-    )
+  const corsResponseHeaders = buildCorsHeaders(request, env, {
+    'Access-Control-Allow-Headers': 'Range, Content-Type, Authorization, Accept, X-Requested-With',
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Encoding, Content-Length, Content-Range'
+  })
+
+  for (const [key, value] of Object.entries(corsResponseHeaders)) {
+    responseHeaders.set(key, value)
   }
 
   responseHeaders.set('Vary', 'Origin')
@@ -210,6 +245,17 @@ async function handleCorsProxyRequest (request, url, env) {
     statusText: res.statusText,
     headers: responseHeaders
   })
+}
+
+function isCorsProxyPath (url) {
+  const pathname = url.pathname || ''
+
+  return (
+    pathname.startsWith('/http://') ||
+    pathname.startsWith('/https://') ||
+    pathname.startsWith('/http:/') ||
+    pathname.startsWith('/https:/')
+  )
 }
 
 // Fetches the access control and content for a URL
@@ -233,12 +279,13 @@ async function handleMetadataGet (request, env, context) {
       if (metaEntry) {
         const metaData = await metaEntry.arrayBuffer()
 
+        const headers = buildCorsHeaders(request, env, {
+          'Content-Length': metaData.byteLength,
+          'Content-Type': 'application/json'
+        })
+
         return new Response(metaData, {
-          headers: {
-            ...corsHeaders,
-            'Content-Length': metaData.byteLength,
-            'Content-Type': 'application/json'
-          }
+          headers
         })
       }
     }
@@ -288,12 +335,13 @@ async function handleMetadataGet (request, env, context) {
 
   context.waitUntil(store.put(`${keyPrefix}.json`, data))
 
+  const headers = buildCorsHeaders(request, env, {
+    'Content-Type': 'application/json',
+    'Content-Length': data.length
+  })
+
   return new Response(data, {
-    headers: {
-      ...corsHeaders,
-      'Content-Type': 'application/json',
-      'Content-Length': data.length
-    }
+    headers
   })
 }
 
@@ -317,12 +365,13 @@ async function handleThumbnailGet (request, env, context) {
       if (thumbEntry) {
         const thumbData = await thumbEntry.arrayBuffer()
 
+        const headers = buildCorsHeaders(request, env, {
+          'Content-Length': thumbData.byteLength,
+          'Content-Type': 'image/png'
+        })
+
         return new Response(thumbData, {
-          headers: {
-            ...corsHeaders,
-            'Content-Length': thumbData.byteLength,
-            'Content-Type': 'image/png'
-          }
+          headers
         })
       }
     }
@@ -403,12 +452,13 @@ async function handleThumbnailGet (request, env, context) {
 
     context.waitUntil(store.put(`${keyPrefix}.png`, thumbData))
 
+    const headers = buildCorsHeaders(request, env, {
+      'Content-Length': thumbData.byteLength,
+      'Content-Type': 'image/png'
+    })
+
     return new Response(thumbData, {
-      headers: {
-        ...corsHeaders,
-        'Content-Length': thumbData.byteLength,
-        'Content-Type': 'image/png'
-      }
+      headers
     })
   } else {
     return new Response('', { status: 404 })
@@ -437,15 +487,16 @@ async function handleOptions (request, env) {
 
   if (
     headers.get('Origin') !== null &&
-    headers.get('Access-Control-Request-Method') !== null &&
-    headers.get('Access-Control-Request-Headers') !== null
+    headers.get('Access-Control-Request-Method') !== null
   ) {
-    const respHeaders = {
-      ...corsHeaders,
-      'Access-Control-Allow-Headers': request.headers.get(
-        'Access-Control-Request-Headers'
-      )
+    const overrides = {}
+    const requestedHeaders = headers.get('Access-Control-Request-Headers')
+
+    if (requestedHeaders) {
+      overrides['Access-Control-Allow-Headers'] = requestedHeaders
     }
+
+    const respHeaders = buildCorsHeaders(request, env, overrides)
 
     return new Response(null, {
       headers: respHeaders
@@ -453,10 +504,12 @@ async function handleOptions (request, env) {
   } else {
     // Handle standard OPTIONS request.
     // If you want to allow other HTTP Methods, you can do that here.
+    const respHeaders = buildCorsHeaders(request, env, {
+      Allow: 'HEAD, GET, POST, PUT, PATCH, DELETE, OPTIONS'
+    })
+
     return new Response(null, {
-      headers: {
-        Allow: 'HEAD, GET, POST, DELETE, OPTIONS'
-      }
+      headers: respHeaders
     })
   }
 }
@@ -508,7 +561,7 @@ function getStore (env) {
 }
 
 async function handleDelete (request, env, context) {
-  const headers = { ...corsHeaders, Vary: 'Origin' }
+  const headers = buildCorsHeaders(request, env, { Vary: 'Origin' })
   const payload = await request.json()
 
   if (!payload.dk) {
@@ -566,7 +619,7 @@ async function handleDelete (request, env, context) {
 }
 
 async function handlePost (request, env, context) {
-  const headers = { ...corsHeaders, Vary: 'Origin' }
+  const headers = buildCorsHeaders(request, env, { Vary: 'Origin' })
 
   const payload = await request.json()
   const errorResponse = validatePayload(headers, payload)
@@ -821,17 +874,19 @@ async function handlePost (request, env, context) {
 
 async function getResponseIfDisallowed (request, env) {
   // No CORS header, so can't do anything
-  const origin = request.headers.get('origin')
+  const origin = request.headers.get('Origin')
   if (!origin) return null
 
   let originQuota = env.ORIGIN_QUOTA ? parseInt(env.ORIGIN_QUOTA) : 10000
+  const allowedOrigins = getAllowedOrigins(env)
+  const originAllowed = isOriginAllowed(origin, env)
 
-  if (env.ALLOWED_ORIGINS) {
-    if (!env.ORIGIN_QUOTA) {
-      originQuota = 0
+  if (allowedOrigins) {
+    if (!originAllowed) {
+      return new Response('Unauthorized', { status: 401 })
     }
 
-    if (env.ALLOWED_ORIGINS.split(',').includes(origin)) {
+    if (!env.ORIGIN_QUOTA) {
       return null
     }
   }
@@ -869,10 +924,19 @@ async function getResponseIfDisallowed (request, env) {
 
 export default {
   async fetch (request, env, context) {
+    const url = new URL(request.url)
     const disallowedResponse = await getResponseIfDisallowed(request, env)
 
     if (disallowedResponse) {
       return disallowedResponse
+    }
+
+    if (request.method === 'OPTIONS') {
+      return handleOptions(request, env, context)
+    }
+
+    if (isCorsProxyPath(url)) {
+      return handleCorsProxyRequest(request, url, env)
     }
 
     if (request.method === 'GET') {
@@ -880,11 +944,7 @@ export default {
     }
 
     if (request.method === 'HEAD') {
-      return handleCorsProxyRequest(request, new URL(request.url), env)
-    }
-
-    if (request.method === 'OPTIONS') {
-      return handleOptions(request, env, context)
+      return handleCorsProxyRequest(request, url, env)
     }
 
     if (request.headers.get('content-type') !== 'application/json') {
